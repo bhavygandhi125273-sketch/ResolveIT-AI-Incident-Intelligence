@@ -1,0 +1,6 @@
+# Never upload local secrets or build output; production settings live in Vercel's environment variables.
+.env*
+!.env.example
+node_modules
+.next
+coverage
