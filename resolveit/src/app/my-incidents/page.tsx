@@ -1,9 +1,9 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { Sidebar } from "@/components/navigation/Sidebar";
-import type { Incident, IncidentSummary } from "@/features/incidents/types";
 import { getIncidentService } from "@/server/incidents/service";
 import { getCurrentUser } from "@/server/auth/session";
+import type { Incident } from "@/features/incidents/types";
 
 export const dynamic = "force-dynamic";
 
@@ -15,27 +15,6 @@ const categoryLabels: Record<Incident["category"], string> = {
   EMAIL_COLLABORATION: "Email & collaboration",
   OTHER: "Other",
 };
-
-const metrics = [
-  {
-    label: "Open incidents",
-    key: "open",
-    note: "Needs IT follow-up",
-    icon: "◷",
-  },
-  {
-    label: "High priority",
-    key: "highPriority",
-    note: "High or critical urgency",
-    icon: "⌁",
-  },
-  {
-    label: "Resolved",
-    key: "resolved",
-    note: "Completed incidents",
-    icon: "✓",
-  },
-] as const;
 
 function formatDate(value: string) {
   return new Intl.DateTimeFormat("en", {
@@ -50,30 +29,24 @@ function statusLabel(status: Incident["status"]) {
     : status.replaceAll("_", " ");
 }
 
-export default async function Home() {
+export default async function MyIncidentsPage() {
   const user = await getCurrentUser();
 
   if (!user) {
     redirect("/login");
   }
 
-  if (user.role === "EMPLOYEE") {
-    redirect("/my-incidents");
+  if (user.role !== "EMPLOYEE") {
+    redirect("/");
   }
 
-  let recent: Incident[] = [];
-  let summary: IncidentSummary | null = null;
+  let incidents: Incident[] = [];
   let dataUnavailable = false;
 
   try {
-    const incidentService = getIncidentService();
-
-    [recent, summary] = await Promise.all([
-      incidentService.listRecent(20),
-      incidentService.getSummary(),
-    ]);
+    incidents = await getIncidentService().listRecent(50, user.id);
   } catch (error) {
-    console.error("Dashboard incident data could not be loaded.", error);
+    console.error("Employee incidents could not be loaded.", error);
     dataUnavailable = true;
   }
 
@@ -84,13 +57,14 @@ export default async function Home() {
       <main className="main-content dashboard-content">
         <header className="topbar">
           <div className="breadcrumb">
-            <span>Workspace</span>
+            <span>My workspace</span>
             <span className="crumb-divider">/</span>
-            <strong>Overview</strong>
+            <strong>My incidents</strong>
           </div>
 
           <div className="topbar-right">
-            <span className="today-label">IT SUPPORT WORKSPACE</span>
+            <span className="today-label">EMPLOYEE SUPPORT</span>
+
             <div className="topbar-avatar">
               {user.displayName.charAt(0).toUpperCase()}
             </div>
@@ -102,13 +76,13 @@ export default async function Home() {
             <div>
               <div className="eyebrow">
                 <span className="eyebrow-line" />
-                INCIDENT INTELLIGENCE
+                MY SUPPORT REQUESTS
               </div>
 
-              <h1>Good morning.</h1>
+              <h1>My incidents.</h1>
 
               <p className="heading-subtitle">
-                Here’s what’s happening across your IT workspace.
+                View the issues you’ve reported and track their status.
               </p>
             </div>
 
@@ -123,61 +97,31 @@ export default async function Home() {
 
           {dataUnavailable && (
             <div className="dashboard-error" role="status">
-              Incident data is temporarily unavailable. Check the database
-              connection and refresh.
+              Your incident data is temporarily unavailable. Please
+              refresh and try again.
             </div>
           )}
-
-          <section
-            className="metric-grid"
-            aria-label="Incident overview"
-          >
-            {metrics.map((metric) => (
-              <article className="metric-card" key={metric.key}>
-                <div className="metric-top">
-                  <span>{metric.label}</span>
-                  <span
-                    className="metric-icon"
-                    aria-hidden="true"
-                  >
-                    {metric.icon}
-                  </span>
-                </div>
-
-                <div className="metric-value">
-                  {summary ? summary[metric.key] : "—"}
-                </div>
-
-                <div className="metric-note">
-                  {metric.note}
-                </div>
-              </article>
-            ))}
-          </section>
 
           <section className="dashboard-columns">
             <article className="panel incident-panel">
               <div className="panel-header">
                 <div>
                   <div className="panel-kicker">
-                    YOUR WORKSPACE
+                    YOUR REPORTS
                   </div>
 
-                  <h2>Recent incidents</h2>
+                  <h2>Reported incidents</h2>
                 </div>
 
                 <span className="count-pill">
-                  {summary
-                    ? `${summary.total} ${
-                        summary.total === 1
-                          ? "incident"
-                          : "incidents"
-                      }`
-                    : "—"}
+                  {incidents.length}{" "}
+                  {incidents.length === 1
+                    ? "incident"
+                    : "incidents"}
                 </span>
               </div>
 
-              {recent.length === 0 && !dataUnavailable ? (
+              {incidents.length === 0 && !dataUnavailable ? (
                 <div className="empty-state">
                   <div className="empty-orbit">
                     <div
@@ -188,20 +132,18 @@ export default async function Home() {
                     </div>
                   </div>
 
-                  <h3>
-                    A clear queue is a good place to start.
-                  </h3>
+                  <h3>No incidents reported yet.</h3>
 
                   <p>
-                    When an incident is reported, it will appear
-                    here with its status and next steps.
+                    When you report an IT issue, it will appear here
+                    so you can track its status.
                   </p>
 
                   <Link
                     className="text-link"
                     href="/incidents/new"
                   >
-                    Report your first issue{" "}
+                    Report an issue{" "}
                     <span aria-hidden="true">→</span>
                   </Link>
                 </div>
@@ -210,7 +152,7 @@ export default async function Home() {
                   className="incident-list"
                   aria-live="polite"
                 >
-                  {recent.map((incident) => (
+                  {incidents.map((incident) => (
                     <Link
                       className="incident-row"
                       key={incident.id}
@@ -250,7 +192,7 @@ export default async function Home() {
                       </span>
 
                       <span className="incident-open-link">
-                        OPEN{" "}
+                        VIEW{" "}
                         <span aria-hidden="true">↗</span>
                       </span>
                     </Link>
@@ -268,17 +210,17 @@ export default async function Home() {
                   >
                     ✳
                   </span>
-                  A BETTER WAY TO GET HELP
+                  NEED IT HELP?
                 </div>
 
                 <h2>
-                  Get back to
+                  We’ll help you
                   <br />
-                  what matters.
+                  get it sorted.
                 </h2>
 
                 <p>
-                  Tell us what’s going on. Your IT team will have
+                  Tell us what’s happening and your IT team will have
                   the context they need to help.
                 </p>
 
@@ -286,7 +228,7 @@ export default async function Home() {
                   className="guide-link"
                   href="/incidents/new"
                 >
-                  Start a report{" "}
+                  Report an issue{" "}
                   <span aria-hidden="true">↗</span>
                 </Link>
 
@@ -302,7 +244,7 @@ export default async function Home() {
 
               <article className="panel activity-panel">
                 <div className="panel-kicker">
-                  INTAKE MODEL
+                  YOUR ACCOUNT
                 </div>
 
                 <div className="activity-empty">
@@ -314,8 +256,9 @@ export default async function Home() {
                   </span>
 
                   <p>
-                    Voice and manual reports pass through the same
-                    server validation before storage.
+                    Signed in as{" "}
+                    <strong>{user.displayName}</strong>. Only your
+                    reported incidents are shown here.
                   </p>
                 </div>
               </article>
@@ -326,7 +269,7 @@ export default async function Home() {
             <span>
               ResolveIT{" "}
               <span className="footer-dot">·</span>{" "}
-              Incident intelligence for IT support
+              Employee support
             </span>
 
             <span className="footer-version">
