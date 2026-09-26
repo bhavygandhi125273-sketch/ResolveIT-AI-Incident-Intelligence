@@ -1,7 +1,9 @@
 import { z } from "zod";
-import { INCIDENT_STATUSES } from "./types";
+import { INCIDENT_STATUSES, NOTE_VISIBILITIES, type Incident } from "./types";
 import { CreateIncidentSchema } from "./validation";
-import type { IncidentService } from "./service";
+import type { IncidentListQuery } from "./filters";
+import { InvalidAssigneeError, type IncidentService } from "./service";
+import type { IncidentWorkflow } from "@/features/decisions/engine";
 
 function errorResponse(
   status: number,
@@ -22,12 +24,15 @@ function errorResponse(
   );
 }
 
+/** Post-creation analysis. It may return an updated incident (for example, after escalation). */
+export type IncidentAnalyzer = (
+  incident: Incident,
+) => Promise<{ incident: Incident; workflow: IncidentWorkflow } | undefined>;
+
 export async function handleCreateIncident(
   request: Request,
   service: IncidentService,
-  analyze?: (
-    incident: Awaited<ReturnType<IncidentService["create"]>>,
-  ) => Promise<unknown>,
+  analyze?: IncidentAnalyzer,
   requesterId?: string,
 ): Promise<Response> {
   let body: unknown;
@@ -58,19 +63,9 @@ export async function handleCreateIncident(
     );
   }
 
+  let incident: Incident;
   try {
-    const incident = await service.create(parsed.data, requesterId);
-
-    const workflow = analyze ? await analyze(incident) : undefined;
-
-    return Response.json(
-      {
-        success: true,
-        data: incident,
-        ...(workflow ? { workflow } : {}),
-      },
-      { status: 201 },
-    );
+    incident = await service.create(parsed.data, requesterId);
   } catch (error) {
     console.error("Incident creation failed.", error);
 
@@ -80,14 +75,31 @@ export async function handleCreateIncident(
       "We could not save your incident. Please try again.",
     );
   }
+
+  // The incident is saved. Analysis problems must never turn that into a failed request.
+  let analysis: Awaited<ReturnType<IncidentAnalyzer>>;
+  try {
+    analysis = analyze ? await analyze(incident) : undefined;
+  } catch (error) {
+    console.error("Incident analysis failed after creation.", error);
+  }
+
+  return Response.json(
+    {
+      success: true,
+      data: analysis?.incident ?? incident,
+      ...(analysis ? { workflow: analysis.workflow } : {}),
+    },
+    { status: 201 },
+  );
 }
 
 export async function handleListIncidents(
   service: IncidentService,
-  requesterId?: string,
+  query: IncidentListQuery = {},
 ): Promise<Response> {
   try {
-    const incidents = await service.listRecent(50, requesterId);
+    const incidents = await service.list(query);
 
     return Response.json({
       success: true,
@@ -104,13 +116,25 @@ export async function handleListIncidents(
   }
 }
 
-const incidentIdSchema = z.string().uuid();
+const incidentIdSchema = z.uuid();
 
-const incidentStatusSchema = z
+export const IncidentUpdateSchema = z
   .object({
-    status: z.enum(INCIDENT_STATUSES),
+    status: z.enum(INCIDENT_STATUSES).optional(),
+    assigneeId: z.uuid().nullable().optional(),
+    note: z
+      .object({
+        body: z.string().trim().min(1, "Write a note first.").max(4000, "Keep notes under 4,000 characters."),
+        visibility: z.enum(NOTE_VISIBILITIES),
+      })
+      .strict()
+      .optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (update) => update.status !== undefined || update.assigneeId !== undefined || update.note !== undefined,
+    "Provide a status, assignee, or note.",
+  );
 
 export async function handleGetIncident(
   id: string,
@@ -149,10 +173,12 @@ export async function handleGetIncident(
   }
 }
 
-export async function handleUpdateIncidentStatus(
+/** IT workflow update. The caller must already have verified the IT_ADMIN role. */
+export async function handleUpdateIncident(
   id: string,
   request: Request,
   service: IncidentService,
+  actorId: string,
 ): Promise<Response> {
   if (!incidentIdSchema.safeParse(id).success) {
     return errorResponse(
@@ -174,39 +200,50 @@ export async function handleUpdateIncidentStatus(
     );
   }
 
-  const parsed = incidentStatusSchema.safeParse(body);
+  const parsed = IncidentUpdateSchema.safeParse(body);
 
   if (!parsed.success) {
     return errorResponse(
       400,
       "VALIDATION_ERROR",
-      "Choose a valid incident status.",
+      parsed.error.issues[0]?.message ?? "The incident update is invalid.",
     );
   }
 
-  try {
-    const incident = await service.updateStatus(
-      id,
-      parsed.data.status,
-    );
+  const update = parsed.data;
 
-    return incident
-      ? Response.json({
-          success: true,
-          data: incident,
-        })
-      : errorResponse(
-          404,
-          "NOT_FOUND",
-          "Incident was not found.",
-        );
+  try {
+    let incident = await service.getById(id);
+    if (!incident) {
+      return errorResponse(404, "NOT_FOUND", "Incident was not found.");
+    }
+
+    if (update.status !== undefined) {
+      incident = await service.updateStatus(id, update.status, actorId) ?? incident;
+    }
+    if (update.assigneeId !== undefined) {
+      incident = await service.assign(id, update.assigneeId, actorId) ?? incident;
+    }
+    if (update.note) {
+      await service.addNote(id, update.note.body, update.note.visibility, actorId);
+      incident = await service.getById(id) ?? incident;
+    }
+
+    return Response.json({
+      success: true,
+      data: incident,
+    });
   } catch (error) {
-    console.error("Incident status update failed.", error);
+    if (error instanceof InvalidAssigneeError) {
+      return errorResponse(400, "VALIDATION_ERROR", error.message);
+    }
+
+    console.error("Incident update failed.", error);
 
     return errorResponse(
       500,
       "INTERNAL_ERROR",
-      "The incident status could not be updated. Please try again.",
+      "The incident could not be updated. Please try again.",
     );
   }
 }

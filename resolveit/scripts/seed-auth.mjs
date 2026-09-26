@@ -52,6 +52,23 @@ if (!databaseUrl) {
   );
 }
 
+// These accounts use publicly known passwords: never allow them on a hosted database.
+// For real accounts use `pnpm user:create`, which generates a strong password.
+const databaseHost = (() => {
+  try {
+    return new URL(databaseUrl).hostname;
+  } catch {
+    return "";
+  }
+})();
+
+if (!["localhost", "127.0.0.1", "::1"].includes(databaseHost)) {
+  console.error(
+    "Refusing to seed test accounts: DATABASE_URL is not a local database. Use `pnpm user:create` for real accounts.",
+  );
+  process.exit(1);
+}
+
 function hashPassword(password) {
   const salt = randomBytes(16).toString("hex");
 

@@ -2,16 +2,14 @@ import {
   handleCreateIncident,
   handleListIncidents,
 } from "@/features/incidents/http";
-
+import { parseIncidentFilters } from "@/features/incidents/filters";
 import { getIncidentService } from "@/server/incidents/service";
-
-import { decideIncident } from "@/features/decisions/engine";
-
-import { investigateIncident } from "@/server/investigation/openAiInvestigator";
-
-import { requireSession } from "@/server/auth/session";
+import { runIncidentWorkflow } from "@/server/incidents/workflow";
+import { authErrorResponse, requireSession } from "@/server/auth/session";
 
 export const runtime = "nodejs";
+// Ticket creation waits for the AI investigation (up to 20s); allow headroom on serverless hosts.
+export const maxDuration = 60;
 
 function unavailable() {
   return Response.json(
@@ -27,141 +25,42 @@ function unavailable() {
   );
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const session = await requireSession();
+    const filters = parseIncidentFilters(new URL(request.url).searchParams);
 
-    /*
-     * EMPLOYEE:
-     * Only return incidents belonging to the
-     * currently authenticated employee.
-     *
-     * IT_ADMIN:
-     * requesterId remains undefined, so the
-     * IT workspace can see all incidents.
-     *
-     * IMPORTANT:
-     * The session property is `id`, not `userId`.
-     */
-    return await handleListIncidents(
-      getIncidentService(),
-      session.role === "EMPLOYEE"
-        ? session.id
-        : undefined,
-    );
+    // Employees are always limited to their own incidents; filters cannot widen that scope.
+    return await handleListIncidents(getIncidentService(), {
+      ...filters,
+      assignee: filters.assignee === "me" ? session.id : filters.assignee,
+      requesterId: session.role === "EMPLOYEE" ? session.id : undefined,
+    });
   } catch (error) {
-    if (
-      error instanceof Error &&
-      error.message ===
-        "AUTHENTICATION_REQUIRED"
-    ) {
-      return Response.json(
-        {
-          success: false,
-          error: {
-            code: "UNAUTHORIZED",
-            message:
-              "Please sign in to view incidents.",
-          },
-        },
-        { status: 401 },
-      );
-    }
+    const authError = authErrorResponse(error, "Please sign in to view incidents.");
+    if (authError) return authError;
 
-    console.error(
-      "Incident list request failed.",
-      error,
-    );
-
+    console.error("Incident list request failed.", error);
     return unavailable();
   }
 }
 
-export async function POST(
-  request: Request,
-) {
+export async function POST(request: Request) {
   try {
-    const session =
-      await requireSession();
+    const session = await requireSession();
 
-    /*
-     * The incident is created first.
-     *
-     * The authenticated user's REAL session ID
-     * is stored as requester_id.
-     */
+    // requester_id is always the authenticated user; the request body cannot set it.
     return await handleCreateIncident(
       request,
       getIncidentService(),
-
-      async (incident) => {
-        /*
-         * AI investigation is a secondary workflow.
-         *
-         * If investigation fails, we DO NOT
-         * pretend that incident creation failed.
-         *
-         * The incident has already been saved.
-         */
-        try {
-          const investigation =
-            await investigateIncident(
-              incident,
-            );
-
-          return {
-            investigation,
-            decision:
-              decideIncident(
-                incident,
-                investigation,
-              ),
-          };
-        } catch (error) {
-          console.error(
-            "Incident investigation failed after incident creation.",
-            error,
-          );
-
-          return {
-            investigation: null,
-            decision: null,
-            investigationError:
-              "AI investigation is temporarily unavailable. The incident was still created successfully.",
-          };
-        }
-      },
-
-      /*
-       * IMPORTANT:
-       * Session uses `id`, not `userId`.
-       */
+      runIncidentWorkflow,
       session.id,
     );
   } catch (error) {
-    if (
-      error instanceof Error &&
-      error.message ===
-        "AUTHENTICATION_REQUIRED"
-    ) {
-      return Response.json(
-        {
-          success: false,
-          error: {
-            code: "UNAUTHORIZED",
-            message:
-              "Please sign in before reporting an incident.",
-          },
-        },
-        { status: 401 },
-      );
-    }
+    const authError = authErrorResponse(error, "Please sign in before reporting an incident.");
+    if (authError) return authError;
 
-    console.error(
-      "Incident creation request failed.",
-      error,
-    );
-
+    console.error("Incident creation request failed.", error);
     return unavailable();
   }
 }

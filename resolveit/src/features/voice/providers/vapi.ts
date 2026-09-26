@@ -7,37 +7,21 @@ import type {
 
 type JsonRecord = Record<string, unknown>;
 
+export const PREPARE_INCIDENT_TOOL = "prepare_incident";
+
 function isRecord(value: unknown): value is JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function transcriptEntry(
-  message: JsonRecord,
-): VoiceTranscriptEntry | null {
+function transcriptEntry(message: JsonRecord): VoiceTranscriptEntry | null {
   if (message.type !== "transcript") return null;
+  if (message.transcriptType && message.transcriptType !== "final") return null;
 
-  const role = message.role;
-  const text = message.transcript;
-
-  if (
-    (role !== "assistant" && role !== "user") ||
-    typeof text !== "string" ||
-    !text.trim()
-  ) {
+  const { role, transcript: text } = message;
+  if ((role !== "assistant" && role !== "user") || typeof text !== "string" || !text.trim()) {
     return null;
   }
-
-  if (
-    message.transcriptType &&
-    message.transcriptType !== "final"
-  ) {
-    return null;
-  }
-
-  return {
-    role,
-    text: text.trim(),
-  };
+  return { role, text: text.trim() };
 }
 
 function parseArguments(value: unknown): unknown {
@@ -48,96 +32,43 @@ function parseArguments(value: unknown): unknown {
       return null;
     }
   }
-
-  if (isRecord(value)) {
-    return value;
-  }
-
-  return null;
+  return isRecord(value) ? value : null;
 }
 
-function normalizeUrgency(value: unknown): unknown {
-  if (typeof value !== "string") {
-    return value;
+/** Extracts prepare_incident arguments from current (tool-calls) and legacy (function-call) messages. */
+export function extractIncidentDraft(message: unknown): { found: false } | { found: true; draft: unknown } {
+  if (!isRecord(message)) return { found: false };
+
+  if (message.type === "tool-calls" && Array.isArray(message.toolCallList)) {
+    for (const call of message.toolCallList) {
+      if (!isRecord(call)) continue;
+      const fn = isRecord(call.function) ? call.function : call;
+      if (fn.name !== PREPARE_INCIDENT_TOOL) continue;
+      return { found: true, draft: parseArguments(fn.arguments ?? fn.parameters) };
+    }
   }
 
-  const normalized = value.trim().toUpperCase();
+  if (message.type === "function-call" && isRecord(message.functionCall)) {
+    const fn = message.functionCall;
+    if (fn.name === PREPARE_INCIDENT_TOOL) {
+      return { found: true, draft: parseArguments(fn.parameters ?? fn.arguments) };
+    }
+  }
 
-  const urgencyMap: Record<string, string> = {
-    LOW: "LOW",
-    MEDIUM: "MEDIUM",
-    HIGH: "HIGH",
-    CRITICAL: "CRITICAL",
-    URGENT: "CRITICAL",
-  };
-
-  return urgencyMap[normalized] ?? value;
+  return { found: false };
 }
 
-function normalizeCategory(value: unknown): unknown {
-  if (typeof value !== "string") {
-    return value;
+function safeVoiceError(error: unknown): Error {
+  const text = isRecord(error) && typeof error.type === "string" ? error.type : "";
+  if (text.includes("permission") || text.includes("microphone")) {
+    return new Error("Microphone access was blocked. Allow microphone access in your browser settings, then retry.");
   }
-
-  const normalized = value.trim().toUpperCase();
-
-  const categoryMap: Record<string, string> = {
-    ACCESS: "ACCOUNT_ACCESS",
-    ACCOUNT_ACCESS: "ACCOUNT_ACCESS",
-
-    HARDWARE: "COMPUTER_HARDWARE",
-    COMPUTER_HARDWARE: "COMPUTER_HARDWARE",
-
-    NETWORK: "NETWORK_CONNECTIVITY",
-    NETWORK_CONNECTIVITY: "NETWORK_CONNECTIVITY",
-
-    SOFTWARE: "SOFTWARE_APPLICATIONS",
-    SOFTWARE_APPLICATIONS: "SOFTWARE_APPLICATIONS",
-
-    EMAIL: "EMAIL_COLLABORATION",
-    COLLABORATION: "EMAIL_COLLABORATION",
-    EMAIL_COLLABORATION: "EMAIL_COLLABORATION",
-
-    OTHER: "OTHER",
-  };
-
-  return categoryMap[normalized] ?? value;
-}
-
-function normalizeIncidentDraft(value: unknown): unknown {
-  if (!isRecord(value)) {
-    return value;
-  }
-
-  return {
-    ...value,
-    urgency: normalizeUrgency(value.urgency),
-    category: normalizeCategory(value.category),
-  };
-}
-
-function getSafeVoiceError(error: unknown): Error {
-  const text =
-    isRecord(error) && typeof error.type === "string"
-      ? error.type
-      : "";
-
-  if (
-    text.includes("permission") ||
-    text.includes("microphone")
-  ) {
-    return new Error(
-      "Microphone access was blocked. Allow microphone access in your browser settings, then retry.",
-    );
-  }
-
-  return new Error(
-    "Vapi could not start the voice conversation. Check the Vapi assistant and browser connection, then retry.",
-  );
+  return new Error("The voice conversation was interrupted. Check your connection and try again, or use the manual report.");
 }
 
 export class VapiVoiceProvider implements VoiceProvider {
   private client: Vapi | null = null;
+  private ended = false;
 
   constructor(
     private readonly publicKey: string,
@@ -146,198 +77,81 @@ export class VapiVoiceProvider implements VoiceProvider {
   ) {}
 
   async start(): Promise<void> {
-    if (
-      !window.isSecureContext ||
-      !navigator.mediaDevices?.getUserMedia
-    ) {
-      throw new Error(
-        "Microphone access requires a secure browser connection. Use the manual report if it is unavailable.",
-      );
+    if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+      throw new Error("Microphone access requires a secure browser connection. Use the manual report if it is unavailable.");
     }
 
     this.callbacks.onStateChange("connecting");
 
     const { default: VapiClient } = await import("@vapi-ai/web");
-
     const client = new VapiClient(this.publicKey);
-
     this.client = client;
+    this.ended = false;
 
-    client.on("call-start", () => {
-      console.log("[ResolveIT] Vapi call started");
-      this.callbacks.onStateChange("listening");
-    });
-
-    client.on("speech-start", () => {
-      this.callbacks.onStateChange("speaking");
-    });
-
-    client.on("speech-end", () => {
-      this.callbacks.onStateChange("listening");
-    });
-
-    client.on("call-end", () => {
-      console.log("[ResolveIT] Vapi call ended");
-      this.client = null;
-      this.callbacks.onStateChange("ready");
-    });
-
+    client.on("call-start", () => this.callbacks.onStateChange("listening"));
+    client.on("speech-start", () => this.callbacks.onStateChange("speaking"));
+    client.on("speech-end", () => this.callbacks.onStateChange("listening"));
+    client.on("call-end", () => this.finish());
     client.on("error", (error: unknown) => {
-      console.error("[ResolveIT] Vapi error:", error);
-
-      this.callbacks.onError(getSafeVoiceError(error));
-      this.callbacks.onStateChange("ready");
-
+      this.callbacks.onError(safeVoiceError(error));
       void this.stop().catch(() => undefined);
     });
-
-    client.on("message", (message: unknown) => {
-      console.log("[ResolveIT] Vapi message:", message);
-      this.handleMessage(message);
-    });
+    client.on("message", (message: unknown) => this.handleMessage(message));
 
     try {
       const call = await client.start(this.assistantId);
-
-      if (!call) {
-        throw new Error("Vapi did not create a voice call.");
-      }
+      if (!call) throw new Error("Vapi did not create a voice call.");
     } catch {
       await client.stop().catch(() => undefined);
-
       this.client = null;
-
-      throw new Error(
-        "Vapi could not start the voice conversation. Check the assistant configuration and try again.",
-      );
+      throw new Error("Vapi could not start the voice conversation. Check the assistant configuration and try again.");
     }
   }
 
   async stop(): Promise<void> {
     const client = this.client;
-
     this.client = null;
-
-    if (!client) {
-      return;
-    }
-
     try {
-      await client.stop();
+      await client?.stop();
     } finally {
-      this.callbacks.onStateChange("ready");
+      this.finish();
     }
   }
 
+  sendSystemMessage(content: string): void {
+    this.client?.send({
+      type: "add-message",
+      message: { role: "system", content },
+      triggerResponseEnabled: true,
+    });
+  }
+
+  say(text: string, endCallAfterSpoken = false): void {
+    this.client?.say(text, endCallAfterSpoken);
+  }
+
+  /** Runs exactly once per call, however the call ended. */
+  private finish(): void {
+    if (this.ended) return;
+    this.ended = true;
+    this.client = null;
+    this.callbacks.onStateChange("ready");
+    this.callbacks.onCallEnd();
+  }
+
   private handleMessage(message: unknown): void {
-    if (!isRecord(message)) {
-      return;
-    }
+    if (!isRecord(message)) return;
 
     const transcript = transcriptEntry(message);
-
     if (transcript) {
       this.callbacks.onTranscript(transcript);
       return;
     }
 
-    /*
-     * Modern Vapi client-side tool event.
-     */
-    if (
-      message.type === "tool-calls" &&
-      Array.isArray(message.toolCallList)
-    ) {
-      for (const call of message.toolCallList) {
-        if (!isRecord(call)) continue;
-
-        const functionData = isRecord(call.function)
-          ? call.function
-          : call;
-
-        const functionName =
-          typeof functionData.name === "string"
-            ? functionData.name
-            : "";
-
-        if (functionName !== "prepare_incident") {
-          continue;
-        }
-
-        const rawDraft = parseArguments(
-          functionData.arguments ??
-            functionData.parameters,
-        );
-
-        if (!rawDraft) {
-          this.callbacks.onError(
-            new Error(
-              "The voice agent returned an invalid incident draft.",
-            ),
-          );
-
-          return;
-        }
-
-        const draft = normalizeIncidentDraft(rawDraft);
-
-        console.log(
-          "[ResolveIT] prepare_incident received:",
-          draft,
-        );
-
-        this.callbacks.onStateChange("processing");
-        this.callbacks.onIncidentDraft(draft);
-
-        return;
-      }
-    }
-
-    /*
-     * Older Vapi function-call event.
-     */
-    if (message.type === "function-call") {
-      const functionCall = isRecord(message.functionCall)
-        ? message.functionCall
-        : null;
-
-      if (!functionCall) {
-        return;
-      }
-
-      const functionName =
-        typeof functionCall.name === "string"
-          ? functionCall.name
-          : "";
-
-      if (functionName !== "prepare_incident") {
-        return;
-      }
-
-      const rawDraft = parseArguments(
-        functionCall.parameters ??
-          functionCall.arguments,
-      );
-
-      if (!rawDraft) {
-        this.callbacks.onError(
-          new Error(
-            "The voice agent returned an invalid incident draft.",
-          ),
-        );
-
-        return;
-      }
-
-      const draft = normalizeIncidentDraft(rawDraft);
-
-      console.log(
-        "[ResolveIT] prepare_incident received:",
-        draft,
-      );
-
+    const toolCall = extractIncidentDraft(message);
+    if (toolCall.found) {
       this.callbacks.onStateChange("processing");
-      this.callbacks.onIncidentDraft(draft);
+      this.callbacks.onIncidentDraft(toolCall.draft);
     }
   }
 }

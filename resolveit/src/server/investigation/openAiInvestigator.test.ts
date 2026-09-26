@@ -1,28 +1,34 @@
 import { describe, expect, it, vi } from "vitest";
 import { investigateIncident } from "./openAiInvestigator";
-import type { Incident } from "@/features/incidents/types";
+import { makeIncident } from "@/testing/fixtures";
 
-const incident: Incident = {
-  id: "incident-1",
+const incident = makeIncident({
   title: "Wi-Fi drops repeatedly",
   description: "The office Wi-Fi disconnects every few minutes.",
-  category: "NETWORK_CONNECTIVITY",
-  status: "OPEN",
   severity: "LOW",
   affectedUsers: 1,
   businessImpact: "Work is interrupted.",
   urgency: "LOW",
-  source: "manual",
-  affectedSystem: null,
-  symptoms: null,
-  startedAt: null,
-  currentlyAffected: null,
-  errorMessages: [],
-  troubleshootingAttempted: [],
-  transcript: null,
-  createdAt: "2026-09-24T12:00:00.000Z",
-  updatedAt: "2026-09-24T12:00:00.000Z",
+  requester: { id: "employee-id", displayName: "Private Person" },
+});
+
+const completeAssessment = {
+  summary: "A single user's office Wi-Fi disconnects.",
+  possibleCause: "Weak signal near the desk.",
+  impact: "One employee is interrupted.",
+  recommendedSteps: ["Check access point logs."],
+  safeToResolve: true,
+  recommendedResolution: "Reconnect to the office Wi-Fi.",
+  requiresHumanIntervention: false,
+  humanInterventionReason: null,
+  missingInformation: [],
 };
+
+function respondWith(assessment: unknown) {
+  return vi.fn().mockResolvedValue(Response.json({
+    output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify(assessment) }] }],
+  }));
+}
 
 describe("OpenAI incident investigator", () => {
   it("reports missing configuration without pretending to investigate", async () => {
@@ -30,25 +36,16 @@ describe("OpenAI incident investigator", () => {
       status: "not_configured",
       safeToResolve: false,
       recommendedResolution: null,
+      requiresHumanIntervention: false,
     });
   });
 
   it("sends a server-side Responses API request and validates the advisory output", async () => {
-    const fetcher = vi.fn().mockResolvedValue(Response.json({
-      output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify({
-        summary: "A single user's office Wi-Fi disconnects.",
-        safeToResolve: true,
-        recommendedResolution: "Reconnect to the office Wi-Fi.",
-        missingInformation: [],
-      }) }] }],
-    }));
+    const fetcher = respondWith(completeAssessment);
 
     await expect(investigateIncident(incident, "test-only-key", fetcher)).resolves.toEqual({
       status: "complete",
-      summary: "A single user's office Wi-Fi disconnects.",
-      safeToResolve: true,
-      recommendedResolution: "Reconnect to the office Wi-Fi.",
-      missingInformation: [],
+      ...completeAssessment,
     });
     expect(fetcher).toHaveBeenCalledWith("https://api.openai.com/v1/responses", expect.objectContaining({
       method: "POST",
@@ -59,15 +56,18 @@ describe("OpenAI incident investigator", () => {
     expect(fetcher.mock.calls[0][0]).not.toContain("test-only-key");
   });
 
+  it("shares incident facts but not requester identity or internal IDs with the model", async () => {
+    const fetcher = respondWith(completeAssessment);
+    await investigateIncident(incident, "test-only-key", fetcher);
+
+    const body = fetcher.mock.calls[0][1]?.body as string;
+    expect(body).toContain("Wi-Fi drops repeatedly");
+    expect(body).not.toContain("Private Person");
+    expect(body).not.toContain(incident.id);
+  });
+
   it("does not mark malformed or unverified suggestions safe", async () => {
-    const fetcher = vi.fn().mockResolvedValue(Response.json({
-      output: [{ content: [{ type: "output_text", text: JSON.stringify({
-        summary: "Incomplete.",
-        safeToResolve: true,
-        recommendedResolution: null,
-        missingInformation: [],
-      }) }] }],
-    }));
+    const fetcher = respondWith({ ...completeAssessment, recommendedResolution: null });
     await expect(investigateIncident(incident, "test-only-key", fetcher)).resolves.toMatchObject({
       status: "unavailable",
       safeToResolve: false,

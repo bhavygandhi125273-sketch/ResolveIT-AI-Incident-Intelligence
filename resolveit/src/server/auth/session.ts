@@ -161,6 +161,28 @@ export async function requireRole(
   return user;
 }
 
+/** Maps requireSession/requireRole failures to 401/403 responses; returns null for other errors. */
+export function authErrorResponse(
+  error: unknown,
+  unauthenticatedMessage: string,
+  forbiddenMessage = "You do not have permission to perform this action.",
+): Response | null {
+  if (!(error instanceof Error)) return null;
+  if (error.message === "AUTHENTICATION_REQUIRED") {
+    return Response.json(
+      { success: false, error: { code: "UNAUTHORIZED", message: unauthenticatedMessage } },
+      { status: 401 },
+    );
+  }
+  if (error.message === "FORBIDDEN") {
+    return Response.json(
+      { success: false, error: { code: "FORBIDDEN", message: forbiddenMessage } },
+      { status: 403 },
+    );
+  }
+  return null;
+}
+
 export async function createSession(userId: string): Promise<void> {
   const token = createSessionToken({
     userId,

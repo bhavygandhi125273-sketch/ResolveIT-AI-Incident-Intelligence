@@ -1,14 +1,27 @@
 import Link from "next/link";
 
+export type SidebarUser = {
+  displayName: string;
+  email: string;
+  role: "EMPLOYEE" | "IT_ADMIN";
+};
+
 type SidebarProps = {
-  active: "overview" | "report";
+  user: SidebarUser;
+  active: "queue" | "tickets" | "report";
   theme?: "dark" | "light";
 };
 
-const links = [
-  { href: "/", label: "Overview", icon: "grid" },
-  { href: "/incidents/new", label: "Report an issue", icon: "plus" },
-] as const;
+const LINKS = {
+  IT_ADMIN: [
+    { key: "queue", href: "/", label: "Incident queue", icon: "▦" },
+    { key: "report", href: "/incidents/new", label: "Report a problem", icon: "+" },
+  ],
+  EMPLOYEE: [
+    { key: "tickets", href: "/my-incidents", label: "My tickets", icon: "▤" },
+    { key: "report", href: "/incidents/new", label: "Report a problem", icon: "+" },
+  ],
+} as const;
 
 function Mark() {
   return (
@@ -20,38 +33,46 @@ function Mark() {
   );
 }
 
-export function Sidebar({ active, theme = "dark" }: SidebarProps) {
+export function Sidebar({ user, active, theme = "dark" }: SidebarProps) {
+  const isIt = user.role === "IT_ADMIN";
+
   return (
     <aside className={`sidebar sidebar-${theme}`}>
-      <Link className="brand" href="/" aria-label="ResolveIT home">
+      <Link className="brand" href={isIt ? "/" : "/my-incidents"} aria-label="ResolveIT home">
         <Mark />
         <span className="brand-name">resolve<span>it</span></span>
       </Link>
 
-      <div className="nav-section-label">WORKSPACE</div>
+      <div className="nav-section-label">{isIt ? "IT WORKSPACE" : "SUPPORT"}</div>
       <nav className="side-nav" aria-label="Main navigation">
-        {links.map((item, index) => {
-          const isActive = (index === 0 && active === "overview") || (index === 1 && active === "report");
-          return (
-            <Link key={item.href} className={`nav-link${isActive ? " active" : ""}`} href={item.href}>
-              <span className="nav-icon" aria-hidden="true">{item.icon === "grid" ? "▦" : "+"}</span>
-              {item.label}
-              {index === 1 && <span className="nav-trailing" aria-hidden="true">↗</span>}
-            </Link>
-          );
-        })}
+        {LINKS[user.role].map((item) => (
+          <Link
+            key={item.key}
+            className={`nav-link${item.key === active ? " active" : ""}`}
+            href={item.href}
+            aria-current={item.key === active ? "page" : undefined}
+          >
+            <span className="nav-icon" aria-hidden="true">{item.icon}</span>
+            {item.label}
+          </Link>
+        ))}
       </nav>
 
       <div className="sidebar-bottom">
-        <div className="sidebar-status">
-          <span className="status-dot" />
-          <span>Workspace ready</span>
-        </div>
         <div className="profile-row">
-          <div className="avatar">R</div>
-          <div className="profile-copy"><strong>ResolveIT</strong><span>IT workspace</span></div>
-          <span className="profile-menu" aria-hidden="true">···</span>
+          <div className="avatar" aria-hidden="true">{user.displayName.charAt(0).toUpperCase()}</div>
+          <div className="profile-copy">
+            <strong>{user.displayName}</strong>
+            <span>{isIt ? "IT support" : "Employee"}</span>
+          </div>
         </div>
+        <form action="/api/auth/logout" method="post" className="logout-form">
+          {/* suppressHydrationWarning: form-filler extensions inject attributes (e.g. fdprocessedid) before hydration. */}
+          <button type="submit" className="logout-button" suppressHydrationWarning>
+            <span aria-hidden="true">⎋</span>
+            <span className="logout-label">Sign out</span>
+          </button>
+        </form>
       </div>
     </aside>
   );

@@ -1,33 +1,15 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { Sidebar } from "@/components/navigation/Sidebar";
+import { Topbar } from "@/components/navigation/Topbar";
+import { SeverityBadge, StatusBadge } from "@/features/incidents/components/Badges";
+import { categoryLabels, formatDateTime } from "@/features/incidents/labels";
+import type { Incident } from "@/features/incidents/types";
 import { getIncidentService } from "@/server/incidents/service";
 import { getCurrentUser } from "@/server/auth/session";
-import type { Incident } from "@/features/incidents/types";
+import { serverEnv } from "@/server/config/env";
 
 export const dynamic = "force-dynamic";
-
-const categoryLabels: Record<Incident["category"], string> = {
-  ACCOUNT_ACCESS: "Account & access",
-  COMPUTER_HARDWARE: "Computer & hardware",
-  NETWORK_CONNECTIVITY: "Network & connectivity",
-  SOFTWARE_APPLICATIONS: "Software & applications",
-  EMAIL_COLLABORATION: "Email & collaboration",
-  OTHER: "Other",
-};
-
-function formatDate(value: string) {
-  return new Intl.DateTimeFormat("en", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(new Date(value));
-}
-
-function statusLabel(status: Incident["status"]) {
-  return status === "INVESTIGATING"
-    ? "IN PROGRESS"
-    : status.replaceAll("_", " ");
-}
 
 export default async function MyIncidentsPage() {
   const user = await getCurrentUser();
@@ -44,237 +26,118 @@ export default async function MyIncidentsPage() {
   let dataUnavailable = false;
 
   try {
-    incidents = await getIncidentService().listRecent(50, user.id);
+    // The requester filter comes from the session, so employees only ever see their own tickets.
+    incidents = await getIncidentService().list({ requesterId: user.id, sort: "updated", limit: 100 });
   } catch (error) {
     console.error("Employee incidents could not be loaded.", error);
     dataUnavailable = true;
   }
 
+  const openCount = incidents.filter((incident) => incident.status !== "RESOLVED").length;
+  const firstName = user.displayName.split(" ")[0];
+  // The public ResolveIT AI line only. The IT support transfer number is never sent to the browser.
+  const aiPhone = serverEnv.resolveItAiPhoneNumber;
+
   return (
     <div className="app-shell app-shell-dark">
-      <Sidebar active="overview" />
+      <Sidebar user={user} active="tickets" />
 
       <main className="main-content dashboard-content">
-        <header className="topbar">
-          <div className="breadcrumb">
-            <span>My workspace</span>
-            <span className="crumb-divider">/</span>
-            <strong>My incidents</strong>
-          </div>
-
-          <div className="topbar-right">
-            <span className="today-label">EMPLOYEE SUPPORT</span>
-
-            <div className="topbar-avatar">
-              {user.displayName.charAt(0).toUpperCase()}
-            </div>
-          </div>
-        </header>
+        <Topbar crumbs={[{ label: "Support" }, { label: "My tickets" }]} label="EMPLOYEE SUPPORT" initial={user.displayName.charAt(0).toUpperCase()} />
 
         <section className="dashboard-inner">
           <div className="page-heading dashboard-heading">
             <div>
-              <div className="eyebrow">
-                <span className="eyebrow-line" />
-                MY SUPPORT REQUESTS
-              </div>
-
-              <h1>My incidents.</h1>
-
-              <p className="heading-subtitle">
-                View the issues you’ve reported and track their status.
-              </p>
+              <div className="eyebrow"><span className="eyebrow-line" />IT SUPPORT</div>
+              <h1>Hi {firstName}. Something not working?</h1>
+              <p className="heading-subtitle">Report a problem and follow your tickets here.</p>
             </div>
-
-            <Link
-              className="button button-primary"
-              href="/incidents/new"
-            >
-              <span aria-hidden="true">+</span>
-              Report an issue
-            </Link>
           </div>
+
+          <section className="report-choice-grid" aria-label="Report a problem">
+            <Link className="report-choice report-choice-primary" href="/incidents/new?mode=voice">
+              <span className="report-choice-icon" aria-hidden="true">◉</span>
+              <span className="report-choice-copy">
+                <strong>Talk to AI</strong>
+                <span>Describe the problem out loud. The assistant asks questions, helps with quick fixes, and creates the ticket for you.</span>
+              </span>
+              <span className="report-choice-arrow" aria-hidden="true">→</span>
+            </Link>
+            <Link className="report-choice" href="/incidents/new?mode=manual">
+              <span className="report-choice-icon" aria-hidden="true">▤</span>
+              <span className="report-choice-copy">
+                <strong>Report manually</strong>
+                <span>Fill in a short form. Your ticket is created as soon as you submit.</span>
+              </span>
+              <span className="report-choice-arrow" aria-hidden="true">→</span>
+            </Link>
+            {aiPhone && (
+              <a className="report-choice" href={`tel:${aiPhone.replace(/[^\d+]/g, "")}`}>
+                <span className="report-choice-icon" aria-hidden="true">☎</span>
+                <span className="report-choice-copy">
+                  <strong>Call ResolveIT AI</strong>
+                  <span className="report-choice-phone">{aiPhone}</span>
+                  <span>Away from your desk? Call and talk to the same AI assistant. Urgent issues are put straight through to IT.</span>
+                </span>
+              </a>
+            )}
+          </section>
 
           {dataUnavailable && (
             <div className="dashboard-error" role="status">
-              Your incident data is temporarily unavailable. Please
-              refresh and try again.
+              Your tickets are temporarily unavailable. Please refresh and try again.
             </div>
           )}
 
-          <section className="dashboard-columns">
-            <article className="panel incident-panel">
-              <div className="panel-header">
-                <div>
-                  <div className="panel-kicker">
-                    YOUR REPORTS
-                  </div>
-
-                  <h2>Reported incidents</h2>
-                </div>
-
-                <span className="count-pill">
-                  {incidents.length}{" "}
-                  {incidents.length === 1
-                    ? "incident"
-                    : "incidents"}
-                </span>
+          <article className="panel queue-panel">
+            <div className="panel-header">
+              <div>
+                <div className="panel-kicker">YOUR TICKETS</div>
+                <h2>My tickets</h2>
               </div>
+              <span className="count-pill">{openCount} open · {incidents.length} total</span>
+            </div>
 
-              {incidents.length === 0 && !dataUnavailable ? (
-                <div className="empty-state">
-                  <div className="empty-orbit">
-                    <div
-                      className="empty-icon"
-                      aria-hidden="true"
-                    >
-                      ✳
-                    </div>
-                  </div>
-
-                  <h3>No incidents reported yet.</h3>
-
-                  <p>
-                    When you report an IT issue, it will appear here
-                    so you can track its status.
-                  </p>
-
-                  <Link
-                    className="text-link"
-                    href="/incidents/new"
-                  >
-                    Report an issue{" "}
-                    <span aria-hidden="true">→</span>
-                  </Link>
-                </div>
-              ) : (
-                <div
-                  className="incident-list"
-                  aria-live="polite"
-                >
-                  {incidents.map((incident) => (
-                    <Link
-                      className="incident-row"
-                      key={incident.id}
-                      href={`/incidents/${incident.id}`}
-                      aria-label={`Open incident ${incident.title}`}
-                    >
-                      <div className="incident-row-main">
-                        <div className="incident-title-line">
-                          <h3>{incident.title}</h3>
-
-                          <span
-                            className={`severity-badge severity-${incident.severity.toLowerCase()}`}
-                          >
-                            {incident.severity}
-                          </span>
-                        </div>
-
-                        <p>
-                          {categoryLabels[incident.category]}
-                          <span> · </span>
-                          {incident.affectedUsers}{" "}
-                          {incident.affectedUsers === 1
-                            ? "person"
-                            : "people"}{" "}
-                          affected
-                        </p>
-
-                        <time dateTime={incident.createdAt}>
-                          {formatDate(incident.createdAt)}
-                        </time>
-                      </div>
-
-                      <span
-                        className={`status-badge status-${incident.status.toLowerCase()}`}
-                      >
-                        {statusLabel(incident.status)}
-                      </span>
-
-                      <span className="incident-open-link">
-                        VIEW{" "}
-                        <span aria-hidden="true">↗</span>
-                      </span>
-                    </Link>
-                  ))}
-                </div>
-              )}
-            </article>
-
-            <aside className="side-column">
-              <article className="guide-card">
-                <div className="guide-tag">
-                  <span
-                    className="guide-spark"
-                    aria-hidden="true"
-                  >
-                    ✳
-                  </span>
-                  NEED IT HELP?
-                </div>
-
-                <h2>
-                  We’ll help you
-                  <br />
-                  get it sorted.
-                </h2>
-
-                <p>
-                  Tell us what’s happening and your IT team will have
-                  the context they need to help.
-                </p>
-
-                <Link
-                  className="guide-link"
-                  href="/incidents/new"
-                >
-                  Report an issue{" "}
-                  <span aria-hidden="true">↗</span>
-                </Link>
-
-                <div
-                  className="guide-decoration"
-                  aria-hidden="true"
-                >
-                  <span />
-                  <span />
-                  <span />
-                </div>
-              </article>
-
-              <article className="panel activity-panel">
-                <div className="panel-kicker">
-                  YOUR ACCOUNT
-                </div>
-
-                <div className="activity-empty">
-                  <span
-                    className="activity-clock"
-                    aria-hidden="true"
-                  >
-                    ✓
-                  </span>
-
-                  <p>
-                    Signed in as{" "}
-                    <strong>{user.displayName}</strong>. Only your
-                    reported incidents are shown here.
-                  </p>
-                </div>
-              </article>
-            </aside>
-          </section>
+            {incidents.length === 0 && !dataUnavailable ? (
+              <div className="empty-state">
+                <div className="empty-orbit"><div className="empty-icon" aria-hidden="true">✳</div></div>
+                <h3>No tickets yet.</h3>
+                <p>When you report a problem, it appears here so you can follow its progress.</p>
+              </div>
+            ) : (
+              <div className="table-scroll">
+                <table className="incident-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">Ticket</th>
+                      <th scope="col">Title</th>
+                      <th scope="col">Category</th>
+                      <th scope="col">Priority</th>
+                      <th scope="col">Status</th>
+                      <th scope="col">Created</th>
+                      <th scope="col">Last updated</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {incidents.map((incident) => (
+                      <tr key={incident.id}>
+                        <td className="cell-reference"><Link href={`/incidents/${incident.id}`}>{incident.reference}</Link></td>
+                        <td className="cell-title"><Link href={`/incidents/${incident.id}`}>{incident.title}</Link></td>
+                        <td>{categoryLabels[incident.category]}</td>
+                        <td><SeverityBadge severity={incident.severity} /></td>
+                        <td><StatusBadge status={incident.status} /></td>
+                        <td className="cell-date"><time dateTime={incident.createdAt}>{formatDateTime(incident.createdAt)}</time></td>
+                        <td className="cell-date"><time dateTime={incident.updatedAt}>{formatDateTime(incident.updatedAt)}</time></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </article>
 
           <footer className="dashboard-footer">
-            <span>
-              ResolveIT{" "}
-              <span className="footer-dot">·</span>{" "}
-              Employee support
-            </span>
-
-            <span className="footer-version">
-              MILESTONE 2
-            </span>
+            <span>ResolveIT <span className="footer-dot">·</span> Only your own tickets are shown here.</span>
           </footer>
         </section>
       </main>

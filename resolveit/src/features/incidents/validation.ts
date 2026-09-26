@@ -12,6 +12,7 @@ export const CreateIncidentSchema = z.object({
   affectedUsers: z.number().int("Enter a whole number.").min(1, "At least one affected person is required.").max(100000, "Enter a realistic number of affected people."),
   businessImpact: z.string().trim().min(3, "Describe how work is affected.").max(2000, "Keep the business impact under 2,000 characters."),
   urgency: z.enum(INCIDENT_URGENCIES),
+  // Browser-submitted sources only. Phone incidents are created server-side from the Vapi webhook.
   source: z.enum(["manual", "voice"]).optional(),
   affectedSystem: optionalText(200),
   symptoms: optionalText(5000),
@@ -19,6 +20,8 @@ export const CreateIncidentSchema = z.object({
   currentlyAffected: z.boolean().nullable().optional(),
   errorMessages: optionalTextList,
   troubleshootingAttempted: optionalTextList,
+  additionalContext: optionalText(5000),
+  humanAssistanceRequested: z.boolean().optional(),
   transcript: z.string().max(12000).optional(),
 }).strict();
 

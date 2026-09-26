@@ -1,4 +1,4 @@
-import { createSession, verifyPassword } from "@/server/auth/session";
+import { createSession, hashPassword, verifyPassword } from "@/server/auth/session";
 import { getDatabasePool } from "@/server/database/pool";
 
 export const runtime = "nodejs";
@@ -15,6 +15,13 @@ type UserRow = {
   role: "EMPLOYEE" | "IT_ADMIN";
   display_name: string;
 };
+
+let dummyPasswordHash: Promise<string> | undefined;
+
+function getDummyPasswordHash() {
+  dummyPasswordHash ??= hashPassword("resolveit-timing-equalizer");
+  return dummyPasswordHash;
+}
 
 function errorResponse(
   status: number,
@@ -75,6 +82,8 @@ export async function POST(request: Request) {
     const user = result.rows[0];
 
     if (!user) {
+      // Spend the same hashing time as a real check so response timing does not reveal which emails exist.
+      await verifyPassword(password, await getDummyPasswordHash());
       return errorResponse(
         401,
         "INVALID_CREDENTIALS",

@@ -1,60 +1,139 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
+import type { ReactNode } from "react";
 import { z } from "zod";
 import { Sidebar } from "@/components/navigation/Sidebar";
+import { Topbar } from "@/components/navigation/Topbar";
+import { SeverityBadge, StatusBadge } from "@/features/incidents/components/Badges";
+import { IncidentAdminActions } from "@/features/incidents/components/IncidentAdminActions";
+import { categoryLabels, decisionLabels, formatDateTime, sourceLabels, statusLabels } from "@/features/incidents/labels";
+import type { StoredInvestigation } from "@/features/incidents/repository";
+import type { IncidentDetail } from "@/features/incidents/service";
+import type { IncidentEvent, UserReference } from "@/features/incidents/types";
 import { getIncidentService } from "@/server/incidents/service";
 import { getCurrentUser } from "@/server/auth/session";
-import type { Incident } from "@/features/incidents/types";
-import { IncidentStatusActions } from "@/features/incidents/components/IncidentStatusActions";
 
 export const dynamic = "force-dynamic";
 
-const categoryLabels: Record<Incident["category"], string> = {
-  ACCOUNT_ACCESS: "Account & access",
-  COMPUTER_HARDWARE: "Computer & hardware",
-  NETWORK_CONNECTIVITY: "Network & connectivity",
-  SOFTWARE_APPLICATIONS: "Software & applications",
-  EMAIL_COLLABORATION: "Email & collaboration",
-  OTHER: "Other",
-};
-
-function valueOrNotProvided(value: string | null | undefined) {
-  return value?.trim() || "Not provided";
+function orNotProvided(value: string | null | undefined) {
+  return value?.trim() || <span className="value-missing">Not provided</span>;
 }
 
-function dateTime(value: string) {
-  return new Intl.DateTimeFormat("en", {
-    dateStyle: "long",
-    timeStyle: "short",
-  }).format(new Date(value));
-}
-
-function DetailField({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
+function Field({ label, children, wide = false }: { label: string; children: ReactNode; wide?: boolean }) {
   return (
-    <div className="incident-detail-field">
+    <div className={`incident-detail-field${wide ? " field-wide" : ""}`}>
       <span>{label}</span>
       <div>{children}</div>
     </div>
   );
 }
 
-function statusLabel(status: Incident["status"]) {
-  return status === "INVESTIGATING"
-    ? "IN PROGRESS"
-    : status.replaceAll("_", " ");
+function List({ items }: { items: string[] }) {
+  if (!items.length) return <span className="value-missing">Not provided</span>;
+  return <ul>{items.map((item, index) => <li key={index}>{item}</li>)}</ul>;
 }
 
-export default async function IncidentDetailPage({
-  params,
-}: {
-  params: Promise<{ id: string }>;
-}) {
+function eventTitle(event: IncidentEvent, forEmployee: boolean) {
+  switch (event.type) {
+    case "CREATED": return "Ticket created";
+    case "INVESTIGATED": return "AI investigation completed";
+    case "ESCALATED": return "Escalated to IT support";
+    case "STATUS_CHANGED": return `Status changed to ${event.toStatus ? statusLabels[event.toStatus] : "unknown"}`;
+    case "ASSIGNED": return forEmployee ? "Assigned to IT staff" : event.body ?? "Assignment changed";
+    case "NOTE": return event.visibility === "INTERNAL" ? "Internal note" : forEmployee ? "Update from IT" : "Note to employee";
+    case "CALL_TRANSFERRED": return "Phone call transferred to IT support";
+  }
+}
+
+function Timeline({ events, forEmployee }: { events: IncidentEvent[]; forEmployee: boolean }) {
+  if (!events.length) return <p className="incident-detail-copy">No activity recorded yet.</p>;
+  return (
+    <ol className="timeline">
+      {events.map((event) => (
+        <li key={event.id} className={`timeline-item timeline-${event.type.toLowerCase()}${event.visibility === "INTERNAL" ? " timeline-internal" : ""}`}>
+          <span className="history-dot" aria-hidden="true" />
+          <div>
+            <strong>{eventTitle(event, forEmployee)}</strong>
+            {event.type === "NOTE" && event.body && <p className="timeline-body">{event.body}</p>}
+            {!forEmployee && (event.type === "ESCALATED" || event.type === "INVESTIGATED") && event.body && (
+              <p className="timeline-body">{event.body}</p>
+            )}
+            <time dateTime={event.createdAt}>
+              {formatDateTime(event.createdAt)}
+              {event.actor && !forEmployee && ` · ${event.actor.displayName}`}
+              {event.actor && forEmployee && event.type === "NOTE" && ` · ${event.actor.displayName}`}
+            </time>
+          </div>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function InvestigationPanel({ investigation, forEmployee }: { investigation: StoredInvestigation | null; forEmployee: boolean }) {
+  if (!investigation) {
+    return (
+      <article className="panel incident-detail-panel">
+        <div className="panel-kicker">AI INVESTIGATION</div>
+        <h2>No AI assessment yet</h2>
+        <p className="incident-detail-copy">
+          This incident was reported before AI investigation results were stored, or the investigation has not run.
+        </p>
+      </article>
+    );
+  }
+
+  const { decision } = investigation;
+
+  return (
+    <article className="panel incident-detail-panel ai-panel">
+      <div className="panel-header">
+        <div>
+          <div className="panel-kicker">AI INVESTIGATION & DECISION</div>
+          <h2>{forEmployee ? "What happens next" : "What the AI found"}</h2>
+        </div>
+        <span className={`decision-pill decision-${decision.action.toLowerCase()}`}>{decisionLabels[decision.action]}</span>
+      </div>
+
+      <div className="decision-box">
+        <strong>{forEmployee ? decisionLabels[decision.action] : "Recommended action"}</strong>
+        <p>{decision.explanation}</p>
+        {decision.resolution && (
+          <p className="decision-resolution"><span>Suggested fix:</span> {decision.resolution}</p>
+        )}
+      </div>
+
+      {investigation.status !== "complete" ? (
+        <p className="incident-detail-copy ai-unavailable">
+          {investigation.status === "not_configured"
+            ? "AI investigation is not configured, so this decision used ResolveIT's priority rules only."
+            : "The AI investigation could not run for this incident, so this decision used ResolveIT's priority rules only."}
+        </p>
+      ) : (
+        <div className="incident-detail-fields">
+          <Field label="Summary" wide>{orNotProvided(investigation.summary)}</Field>
+          {!forEmployee && (
+            <>
+              <Field label="Possible cause">{orNotProvided(investigation.possibleCause)}</Field>
+              <Field label="Impact">{orNotProvided(investigation.impact)}</Field>
+              <Field label="Recommended troubleshooting for IT" wide><List items={investigation.recommendedSteps} /></Field>
+              <Field label="Human intervention">
+                {investigation.requiresHumanIntervention ? "Required" : "Not required"}
+                {investigation.humanInterventionReason && <> — {investigation.humanInterventionReason}</>}
+              </Field>
+              <Field label="Missing information"><List items={investigation.missingInformation} /></Field>
+            </>
+          )}
+        </div>
+      )}
+      <p className="ai-footnote">
+        AI output is advisory. {forEmployee ? "Your IT team makes the final call." : "ResolveIT's rules chose the action; IT makes the final call."}
+      </p>
+    </article>
+  );
+}
+
+export default async function IncidentDetailPage({ params }: PageProps<"/incidents/[id]">) {
   const user = await getCurrentUser();
 
   if (!user) {
@@ -63,252 +142,140 @@ export default async function IncidentDetailPage({
 
   const { id } = await params;
 
-  if (!z.string().uuid().safeParse(id).success) {
+  if (!z.uuid().safeParse(id).success) {
     notFound();
   }
 
-  const incident = await getIncidentService().getById(
-    id,
-    user.role === "EMPLOYEE" ? user.id : undefined,
-  );
+  const service = getIncidentService();
+  // getDetail enforces ownership for employees and hides internal notes from them.
+  const detail: IncidentDetail | null = await service.getDetail(id, user);
 
-  if (!incident) {
+  if (!detail) {
     notFound();
   }
 
-  const isITAdmin = user.role === "IT_ADMIN";
+  const { incident, investigation, events } = detail;
+  const isIt = user.role === "IT_ADMIN";
+  const staff: UserReference[] = isIt ? await service.listItStaff() : [];
+  const backHref = isIt ? "/" : "/my-incidents";
 
   return (
     <div className="app-shell app-shell-dark">
-      <Sidebar active="overview" />
+      <Sidebar user={user} active={isIt ? "queue" : "tickets"} />
 
       <main className="main-content dashboard-content">
-        <header className="topbar">
-          <div className="breadcrumb">
-            <Link href={isITAdmin ? "/" : "/my-incidents"}>
-              {isITAdmin ? "Workspace" : "My incidents"}
-            </Link>
-
-            <span className="crumb-divider">/</span>
-
-            <strong>Incident detail</strong>
-          </div>
-
-          <div className="topbar-right">
-            <span className="today-label">
-              {isITAdmin ? "IT SUPPORT WORKSPACE" : "EMPLOYEE SUPPORT"}
-            </span>
-
-            <div className="topbar-avatar">
-              {user.displayName.charAt(0).toUpperCase()}
-            </div>
-          </div>
-        </header>
+        <Topbar
+          crumbs={[{ label: isIt ? "Incident queue" : "My tickets", href: backHref }, { label: incident.reference }]}
+          label={isIt ? "IT SUPPORT WORKSPACE" : "EMPLOYEE SUPPORT"}
+          initial={user.displayName.charAt(0).toUpperCase()}
+        />
 
         <section className="dashboard-inner incident-detail-page">
-          <Link
-            href={isITAdmin ? "/" : "/my-incidents"}
-            className="back-link detail-back-link"
-          >
-            ← {isITAdmin ? "Back to IT queue" : "Back to my incidents"}
+          <Link href={backHref} className="back-link detail-back-link">
+            ← {isIt ? "Back to the queue" : "Back to my tickets"}
           </Link>
 
           <div className="incident-detail-header">
             <div>
               <div className="eyebrow">
                 <span className="eyebrow-line" />
-                INCIDENT · {incident.source.toUpperCase()} REPORT
+                {incident.reference} · {sourceLabels[incident.source].toUpperCase()} REPORT
               </div>
-
               <h1>{incident.title}</h1>
-
-              <p className="heading-subtitle">{incident.id}</p>
+              <p className="heading-subtitle">
+                Reported {formatDateTime(incident.createdAt, "long")}
+                {isIt && ` by ${incident.requester?.displayName ?? "an unknown requester"}`}
+                {" · "}Last updated {formatDateTime(incident.updatedAt)}
+              </p>
             </div>
-
-            <span
-              className={`severity-badge severity-${incident.severity.toLowerCase()}`}
-            >
-              {incident.severity} PRIORITY
-            </span>
+            <div className="detail-header-badges">
+              <SeverityBadge severity={incident.severity} />
+              <StatusBadge status={incident.status} />
+            </div>
           </div>
+
+          {incident.status === "ESCALATED" && (
+            <div className="escalation-banner" role="status">
+              <strong>{isIt ? "Escalated — needs a person from IT" : "Escalated to IT support"}</strong>
+              <p>
+                {isIt
+                  ? incident.escalationReason ?? "Escalated for human attention."
+                  : "A person from IT will contact you. There is no need to report this again."}              </p>
+              {incident.escalatedAt && <time dateTime={incident.escalatedAt}>Escalated {formatDateTime(incident.escalatedAt)}</time>}
+            </div>
+          )}
 
           <div className="incident-detail-grid">
             <div className="incident-detail-main">
               <article className="panel incident-detail-panel">
-                <div className="panel-header">
-                  <div>
-                    <div className="panel-kicker">
-                      REPORTED INFORMATION
-                    </div>
-
-                    <h2>Incident details</h2>
-                  </div>
-
-                  <span
-                    className={`status-badge status-${incident.status.toLowerCase()}`}
-                  >
-                    {statusLabel(incident.status)}
-                  </span>
-                </div>
-
+                <div className="panel-kicker">WHAT HAPPENED</div>
+                <h2>Incident details</h2>
                 <div className="incident-detail-fields">
-                  <DetailField label="Description">
-                    {incident.description}
-                  </DetailField>
-
-                  <DetailField label="Category">
-                    {categoryLabels[incident.category]}
-                  </DetailField>
-
-                  <DetailField label="Affected system">
-                    {valueOrNotProvided(incident.affectedSystem)}
-                  </DetailField>
-
-                  <DetailField label="Affected users">
-                    {incident.affectedUsers}
-                  </DetailField>
-
-                  <DetailField label="Business impact">
-                    {incident.businessImpact}
-                  </DetailField>
-
-                  <DetailField label="Symptoms">
-                    {valueOrNotProvided(incident.symptoms)}
-                  </DetailField>
-
-                  <DetailField label="When it started">
-                    {valueOrNotProvided(incident.startedAt)}
-                  </DetailField>
-
-                  <DetailField label="Currently affected">
-                    {incident.currentlyAffected === null
-                      ? "Not provided"
-                      : incident.currentlyAffected
-                        ? "Yes"
-                        : "No"}
-                  </DetailField>
-
-                  <DetailField label="Error messages">
-                    {incident.errorMessages.length ? (
-                      <ul>
-                        {incident.errorMessages.map(
-                          (message, index) => (
-                            <li key={index}>{message}</li>
-                          ),
-                        )}
-                      </ul>
-                    ) : (
-                      "Not provided"
-                    )}
-                  </DetailField>
-
-                  <DetailField label="Troubleshooting already performed">
-                    {incident.troubleshootingAttempted.length ? (
-                      <ul>
-                        {incident.troubleshootingAttempted.map(
-                          (step, index) => (
-                            <li key={index}>{step}</li>
-                          ),
-                        )}
-                      </ul>
-                    ) : (
-                      "Not provided"
-                    )}
-                  </DetailField>
-
-                  <DetailField label="Potential cause">
-                    Not provided
-                  </DetailField>
-
-                  <DetailField label="Recommended next steps">
-                    Not provided
-                  </DetailField>
-
-                  <DetailField label="Assigned to / team">
-                    Not assigned — no assignment model is configured.
-                  </DetailField>
+                  <Field label="Description" wide>{incident.description}</Field>
+                  <Field label="Category">{categoryLabels[incident.category]}</Field>
+                  <Field label="Affected system">{orNotProvided(incident.affectedSystem)}</Field>
+                  <Field label="People affected">{incident.affectedUsers}</Field>
+                  <Field label="Urgency reported">{incident.urgency.charAt(0) + incident.urgency.slice(1).toLowerCase()}</Field>
+                  <Field label="Business impact" wide>{incident.businessImpact}</Field>
+                  <Field label="Symptoms" wide>{orNotProvided(incident.symptoms)}</Field>
+                  <Field label="When it started">{orNotProvided(incident.startedAt)}</Field>
+                  <Field label="Still happening">
+                    {incident.currentlyAffected === null ? <span className="value-missing">Not provided</span> : incident.currentlyAffected ? "Yes" : "No"}
+                  </Field>
+                  <Field label="Error messages" wide><List items={incident.errorMessages} /></Field>
+                  <Field label="Already tried" wide><List items={incident.troubleshootingAttempted} /></Field>
+                  {incident.additionalContext && <Field label="Other information" wide>{incident.additionalContext}</Field>}
+                  {isIt && incident.source === "phone" && (
+                    <Field label="Caller">
+                      {incident.callerPhone ?? "Unknown number"}
+                      {incident.requester ? ` — matched to ${incident.requester.displayName}` : " — not linked to a ResolveIT account"}
+                    </Field>
+                  )}
+                  {isIt && incident.humanAssistanceRequested &&<Field label="Human help requested" wide>Yes — the employee or voice assistant asked for a person from IT.</Field>}
                 </div>
               </article>
 
-              <article className="panel incident-detail-panel">
-                <div className="panel-kicker">
-                  INVESTIGATION CONTEXT
-                </div>
+              <InvestigationPanel investigation={investigation} forEmployee={!isIt} />
 
-                <h2>What the employee shared</h2>
-
-                <p className="incident-detail-copy">
-                  {incident.transcript?.trim() ||
-                    "No conversation transcript was provided."}
-                </p>
-              </article>
+              {incident.transcript?.trim() && (
+                <article className="panel incident-detail-panel">
+                  <details className="transcript-details">
+                    <summary>
+                      <span className="panel-kicker">{incident.source === "phone" ? "PHONE CALL TRANSCRIPT" : "VOICE CONVERSATION"}</span>
+                      <span className="transcript-toggle">Show transcript</span>
+                    </summary>
+                    <pre className="transcript-text">{incident.transcript}</pre>
+                  </details>
+                </article>
+              )}
             </div>
 
             <aside className="incident-detail-side">
-              {isITAdmin ? (
-                <article className="panel incident-detail-panel">
-                  <div className="panel-kicker">
-                    IT TEAM QUEUE
-                  </div>
-
-                  <h2>Work this incident</h2>
-
-                  <p className="incident-detail-copy">
-                    This incident is stored in ResolveIT for the
-                    internal IT queue. No external ticketing or
-                    notification integration is connected.
-                  </p>
-
-                  <IncidentStatusActions
+              <article className="panel incident-detail-panel">
+                <div className="panel-kicker">{isIt ? "WORK THIS INCIDENT" : "TICKET STATUS"}</div>
+                <h2>{isIt ? "IT actions" : statusLabels[incident.status]}</h2>
+                {isIt ? (
+                  <IncidentAdminActions
                     incidentId={incident.id}
                     currentStatus={incident.status}
+                    assigneeId={incident.assignee?.id ?? null}
+                    staff={staff}
+                    currentUserId={user.id}
                   />
-                </article>
-              ) : (
-                <article className="panel incident-detail-panel">
-                  <div className="panel-kicker">
-                    INCIDENT STATUS
-                  </div>
-
-                  <h2>Your report</h2>
-
-                  <p className="incident-detail-copy">
-                    Your IT team is reviewing this incident. You can
-                    return here to see the latest status.
-                  </p>
-
-                  <div
-                    className={`status-badge status-${incident.status.toLowerCase()}`}
-                  >
-                    {statusLabel(incident.status)}
-                  </div>
-                </article>
-              )}
+                ) : (
+                  <dl className="side-facts">
+                    <div><dt>Ticket</dt><dd className="outcome-reference">{incident.reference}</dd></div>
+                    <div><dt>Status</dt><dd><StatusBadge status={incident.status} /></dd></div>
+                    <div><dt>Priority</dt><dd><SeverityBadge severity={incident.severity} /></dd></div>
+                    <div><dt>Handled by</dt><dd>{incident.assignee ? incident.assignee.displayName : "Waiting for an IT team member"}</dd></div>
+                  </dl>
+                )}
+              </article>
 
               <article className="panel incident-detail-panel">
-                <div className="panel-kicker">RECORD</div>
-
-                <h2>History</h2>
-
-                <div className="incident-history">
-                  <span className="history-dot" />
-
-                  <p>
-                    <strong>Incident reported</strong>
-                    <time>{dateTime(incident.createdAt)}</time>
-                  </p>
-                </div>
-
-                {incident.updatedAt !== incident.createdAt && (
-                  <div className="incident-history">
-                    <span className="history-dot" />
-
-                    <p>
-                      <strong>Record last updated</strong>
-                      <time>{dateTime(incident.updatedAt)}</time>
-                    </p>
-                  </div>
-                )}
+                <div className="panel-kicker">ACTIVITY</div>
+                <h2>Timeline</h2>
+                <Timeline events={events} forEmployee={!isIt} />
               </article>
             </aside>
           </div>

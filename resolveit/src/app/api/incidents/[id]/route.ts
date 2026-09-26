@@ -1,9 +1,12 @@
 import {
   handleGetIncident,
-  handleUpdateIncidentStatus,
+  handleUpdateIncident,
 } from "@/features/incidents/http";
+import { requesterScope } from "@/features/incidents/service";
 import { getIncidentService } from "@/server/incidents/service";
-import { requireSession, requireRole } from "@/server/auth/session";
+import { authErrorResponse, requireRole, requireSession } from "@/server/auth/session";
+
+export const runtime = "nodejs";
 
 type RouteContext = {
   params: Promise<{ id: string }>;
@@ -37,19 +40,11 @@ export async function GET(
     return await handleGetIncident(
       id,
       getIncidentService(),
-      session.role === "EMPLOYEE" ? session.id : undefined,
+      requesterScope(session),
     );
   } catch (error) {
-    if (
-      error instanceof Error &&
-      error.message === "AUTHENTICATION_REQUIRED"
-    ) {
-      return errorResponse(
-        401,
-        "UNAUTHORIZED",
-        "Please sign in to view this incident.",
-      );
-    }
+    const authError = authErrorResponse(error, "Please sign in to view this incident.");
+    if (authError) return authError;
 
     console.error("Incident detail request failed.", error);
 
@@ -61,49 +56,35 @@ export async function GET(
   }
 }
 
+/** IT workflow actions: status, assignment, and notes. IT_ADMIN only. */
 export async function PATCH(
   request: Request,
   { params }: RouteContext,
 ) {
   try {
-    await requireRole("IT_ADMIN");
-
+    const admin = await requireRole("IT_ADMIN");
     const { id } = await params;
 
-    return await handleUpdateIncidentStatus(
+    return await handleUpdateIncident(
       id,
       request,
       getIncidentService(),
+      admin.id,
     );
   } catch (error) {
-    if (
-      error instanceof Error &&
-      error.message === "AUTHENTICATION_REQUIRED"
-    ) {
-      return errorResponse(
-        401,
-        "UNAUTHORIZED",
-        "Please sign in to update incidents.",
-      );
-    }
+    const authError = authErrorResponse(
+      error,
+      "Please sign in to update incidents.",
+      "Only IT staff can update incidents.",
+    );
+    if (authError) return authError;
 
-    if (
-      error instanceof Error &&
-      error.message === "FORBIDDEN"
-    ) {
-      return errorResponse(
-        403,
-        "FORBIDDEN",
-        "Only IT administrators can update incident status.",
-      );
-    }
-
-    console.error("Incident status update failed.", error);
+    console.error("Incident update failed.", error);
 
     return errorResponse(
       500,
       "INTERNAL_ERROR",
-      "The incident status could not be updated. Please try again.",
+      "The incident could not be updated. Please try again.",
     );
   }
 }

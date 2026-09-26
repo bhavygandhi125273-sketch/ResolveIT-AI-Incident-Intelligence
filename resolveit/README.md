@@ -1,62 +1,101 @@
 # ResolveIT
 
-ResolveIT is an IT incident intake and intelligence platform. Employees can report through a Vapi-powered browser voice agent or the manual form. Incident records are validated and stored by ResolveIT; AI can investigate and recommend safe next steps, while deterministic server rules select severity actions.
+ResolveIT is an AI incident intelligence platform for employees and IT teams. It is one application with two roles:
+
+- **EMPLOYEE** — reports problems by talking to an AI voice assistant or with a form, and follows their own tickets.
+- **IT_ADMIN** — works the incident queue: sees every incident, the AI investigation and decision, and manages status, assignment, and notes.
 
 ## Incident flow
 
-1. The employee reports an issue using voice or the manual form. Manual reporting remains available when voice is not configured.
-2. The Vapi Web SDK handles microphone and real-time conversation. A browser-safe public Vapi key and assistant ID are restricted to the application's allowed origin and assistant.
-3. The assistant may call the client-side prepare_incident tool to deliver a structured draft. ResolveIT validates it, shows an employee review form, and waits for explicit confirmation.
-4. Confirmed voice and manual reports use the POST /api/incidents endpoint. The server validates the data and persists it to PostgreSQL; Vapi has no direct database access.
-5. The server-side OpenAI Responses API investigator can summarize evidence and suggest a safe employee-performed remedy. Its output is advisory and schema-validated. It cannot set incident severity or perform operational actions.
-6. ResolveIT's deterministic decision engine chooses a proposed outcome: safe low-severity resolution, standard ticket, prioritized ticket, or human escalation. Ticketing and escalation integrations are not yet connected; the API returns the decision without claiming those external actions were performed.
+```
+Report (voice or form) → incident saved → AI investigation → decision engine → stored result
+                                                               ├─ queue a ticket for IT
+                                                               ├─ suggest a safe self-service fix
+                                                               └─ escalate to a human (status ESCALATED)
+```
+
+1. **Manual report:** the employee fills in the form and submits. The ticket is created immediately.
+2. **Voice report (browser or phone):** the Vapi assistant talks with the employee, suggests safe fixes, and calls the client-side tool `prepare_incident`.
+   - If required facts are missing, ResolveIT tells the assistant what to ask next.
+   - When the draft is complete, ResolveIT **creates the ticket automatically** (no confirmation step), speaks the ticket reference, and ends the call.
+   - See [docs/vapi-assistant-setup.md](docs/vapi-assistant-setup.md).
+3. **Investigation:** the server-side OpenAI investigator (advisory only) assesses the likely cause, impact, recommended steps, and whether a human is needed. It sees incident facts only, never requester identity.
+4. **Decision:** deterministic rules in `src/features/decisions/engine.ts` choose the action:
+   - **CRITICAL** always escalates to a human.
+   - **HIGH / MEDIUM** escalate when the AI judges human intervention is required. If the AI is unavailable, HIGH escalates and MEDIUM is queued as a prioritized ticket.
+   - **LOW** gets a self-service suggestion only when the AI found a safe, reversible fix; otherwise it is queued as a normal ticket.
+5. **Storage:** the investigation, decision, escalation, and every status change, assignment, and note are stored. The IT dashboard and the employee's ticket view read the same record, so IT status changes appear for the employee immediately.
+
+### Human escalation
+
+Escalated incidents get status **ESCALATED** and appear at the top of the IT queue.
+
+- **Browser AI:** the employee is told IT will contact them. Browser calls cannot be transferred.
+- **Phone AI:** the employee calls the ResolveIT AI number (`RESOLVEIT_AI_PHONE_NUMBER`). When ResolveIT escalates the call's ticket, Vapi transfers the live call to `IT_SUPPORT_PHONE`, and IT already has the ticket, investigation, and transcript. See [docs/vapi-assistant-setup.md](docs/vapi-assistant-setup.md).
+
+`IT_SUPPORT_PHONE` is server-only. It is sent to Vapi as the transfer destination and never shown to employees.
+
+## Security model
+
+- Identity and role always come from the signed session cookie (HMAC-signed, httpOnly, SameSite=Lax). The request body cannot set `requesterId`, `severity`, or `status`.
+- Employees only see incidents they reported. Another person's incident returns 404.
+- Only IT_ADMIN can change status, assign, or add notes. Assignees must be IT staff.
+- IT notes are either **internal** (IT only, never returned to employees) or **visible to the employee**. This is enforced in the service layer (`getDetail`).
 
 ## Architecture
 
-- src/app — Next.js pages and API routes.
-- src/features/incidents — incident model, validation, intake service, repository contract, PostgreSQL repository, manual form.
-- src/features/voice/providers — provider interface and Vapi Web SDK adapter.
-- src/features/voice — Vapi conversation UI, draft validation, employee review, and incident API submission.
-- src/features/decisions — deterministic severity decision rules.
-- src/server/investigation — server-only OpenAI investigation boundary.
-- src/server/database — PostgreSQL connection pool.
-- database/migrations — versioned SQL schema, including voice incident context.
-
-Vapi supplies the real-time conversation layer. ResolveIT retains incident validation, persisted records, investigation, severity decisions, and all future ticket/escalation integrations. There is no active ElevenLabs integration.
-
-## Environment
-
-Copy .env.example to .env.local and configure database settings there. .env.local is ignored by Git. The Vapi launcher prompts for browser-safe public configuration; it requests the OpenAI key through hidden input and keeps it only in the development server's environment.
-
-- NEXT_PUBLIC_VAPI_PUBLIC_KEY — Vapi public API key for the browser SDK. Vapi explicitly designs this key for browser use. Restrict allowed origins and assistants in the Vapi dashboard; never put a private key in this variable.
-- NEXT_PUBLIC_VAPI_ASSISTANT_ID — the ResolveIT incident intake assistant ID.
-- OPENAI_API_KEY — private OpenAI key used only by the server-side investigation service.
-- POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, DATABASE_URL — local PostgreSQL configuration.
-
-Create the ResolveIT assistant in the Vapi dashboard and follow docs/vapi-assistant-setup.md. Choose a Vapi-supported model, voice, and transcriber in that account and add the prepare_incident client tool described in the guide. For an OpenAI-backed Vapi assistant, separately configure its provider credentials in Vapi; ResolveIT's OPENAI_API_KEY is never sent to Vapi.
-
-## Local development
-
-Codex's Windows environment provides Node.js and pnpm. If they are not on the shell PATH, use scripts/dev-with-vapi.ps1, which resolves the bundled executable paths. Install project dependencies with pnpm install; start PostgreSQL and apply migrations:
-
-    pnpm db:up
-    pnpm db:migrate
-    pnpm dev
-
-Visit http://localhost:3000. The dashboard is /; incident reporting is /incidents/new. The DB migration runner applies pending files once, and the local Compose volume retains incidents.
+- `src/app` — pages (employee portal `/my-incidents`, IT queue `/`, reporting `/incidents/new`, detail `/incidents/[id]`, `/login`) and API routes.
+- `src/features/incidents` — model, validation, filters, labels, normalization, service, repository contract, PostgreSQL repository, UI components.
+- `src/features/voice` — Vapi provider, draft schema, submission gateway, agent messages, session outcome logic, voice UI.
+- `src/features/decisions` — deterministic decision engine.
+- `src/features/auth` — login form.
+- `src/server` — session auth, env config, database pool, OpenAI investigator, incident workflow runner.
+- `database/migrations` — versioned SQL schema.
 
 ## API
 
-- POST /api/incidents — validates and stores an incident; responds with the incident plus server-side investigation and deterministic decision status.
-- GET /api/incidents — returns recent incidents for the dashboard.
+| Method | Path | Who | Purpose |
+| --- | --- | --- | --- |
+| POST | `/api/auth/login` | anyone | Sign in |
+| POST | `/api/auth/logout` | signed in | Sign out (form POST, redirects to `/login`) |
+| POST | `/api/incidents` | signed in | Create an incident; returns the incident plus investigation and decision |
+| GET | `/api/incidents` | signed in | List incidents. Employees get only their own. Filters: `status`, `severity`, `category`, `source`, `assignee` (`me`, `unassigned`, or ID), `from`, `to`, `sort` |
+| GET | `/api/incidents/:id` | owner or IT | Incident detail |
+| PATCH | `/api/incidents/:id` | IT_ADMIN | `{ status?, assigneeId?, note?: { body, visibility: "INTERNAL" \| "PUBLIC" } }` |
+| POST | `/api/vapi/webhook` | Vapi (shared secret) | Phone channel: `prepare_incident` tool calls, transfer destination, end-of-call transcript |
 
-The voice flow does not auto-submit or display raw JSON. Agent-supplied status and severity are rejected. The employee reviews and confirms the draft, and server validation runs again before storage.
+## Environment
+
+Copy `.env.example` to `.env.local` (ignored by Git) and fill in:
+
+- `DATABASE_URL`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` — local PostgreSQL.
+- `AUTH_SECRET` — **required** to sign in; a long random value.
+- `OPENAI_API_KEY` — server-only; enables AI investigation. Without it, decisions use the priority rules only.
+- `NEXT_PUBLIC_VAPI_PUBLIC_KEY`, `NEXT_PUBLIC_VAPI_ASSISTANT_ID` — browser-safe Vapi public key and assistant. Without them, voice is disabled and the form still works.
+- `IT_SUPPORT_PHONE` — server-only; the live-transfer destination for escalated phone calls.
+- `VAPI_WEBHOOK_SECRET` — server-only; shared secret Vapi sends to `/api/vapi/webhook`.
+- `RESOLVEIT_AI_PHONE_NUMBER` — the Vapi number employees call; shown on the employee dashboard.
+- `VAPI_TRANSFER_MODE` — optional: `blind-transfer` (default) or a warm mode (Twilio numbers only).
+
+Link an employee's phone for caller ID with `pnpm db:set-phone <email> <+E.164 number>`.
+
+## Local development
+
+```
+pnpm install
+pnpm db:up        # PostgreSQL in Docker
+pnpm db:migrate   # apply migrations
+pnpm db:seed      # local test accounts (development only)
+pnpm dev
+```
+
+Open http://localhost:3000 and sign in. `pnpm db:seed` prints the local development accounts. They are for local use only.
 
 ## Checks
 
-    pnpm lint
-    pnpm typecheck
-    pnpm test
-    pnpm build
-
-For the runtime-secure local server, run scripts/dev-with-vapi.ps1 instead of pnpm dev. Database setup requires Docker Desktop with its engine available. No AI or voice behavior is simulated when credentials are absent.
+```
+pnpm lint
+pnpm typecheck
+pnpm test
+pnpm build
+```

@@ -11,7 +11,10 @@
     "test": "vitest run",
     "db:up": "docker compose up -d postgres",
     "db:down": "docker compose stop postgres",
-    "db:migrate": "node scripts/migrate.mjs"
+    "db:migrate": "node scripts/migrate.mjs",
+    "db:seed": "node scripts/seed-auth.mjs",
+    "db:set-phone": "node scripts/set-user-phone.mjs",
+    "user:create": "node scripts/create-user.mjs"
   },
   "dependencies": {
     "@next/env": "16.3.6",

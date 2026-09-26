@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { IncompleteVoiceDraftError, submitVoiceIncidentDraft } from "./submission";
-import type { Incident } from "@/features/incidents/types";
+import { makeIncident } from "@/testing/fixtures";
 import type { CreateIncidentInput } from "@/features/incidents/validation";
 
 const completeDraft = {
@@ -12,44 +12,50 @@ const completeDraft = {
   urgency: "HIGH",
 } satisfies CreateIncidentInput;
 
-const savedIncident: Incident = {
-  id: "voice-incident-id",
-  ...completeDraft,
-  status: "OPEN",
-  severity: "HIGH",
-  source: "voice",
-  affectedSystem: null,
-  symptoms: null,
-  startedAt: null,
-  currentlyAffected: null,
-  errorMessages: [],
-  troubleshootingAttempted: [],
-  transcript: null,
-  createdAt: "2026-09-24T12:00:00.000Z",
-  updatedAt: "2026-09-24T12:00:00.000Z",
-};
+const savedIncident = makeIncident({ ...completeDraft, severity: "HIGH", source: "voice" });
+const created = () => vi.fn().mockResolvedValue(Response.json({ success: true, data: savedIncident }, { status: 201 }));
+const sentBody = (fetcher: ReturnType<typeof vi.fn>) => JSON.parse(fetcher.mock.calls[0][1]?.body as string);
 
 describe("voice incident submission boundary", () => {
-  it("sends a complete voice draft to the existing incident API", async () => {
-    const fetcher = vi.fn().mockResolvedValue(Response.json({ success: true, data: savedIncident }, { status: 201 }));
+  it("automatically sends a complete voice draft to the incident API", async () => {
+    const fetcher = created();
 
     await expect(submitVoiceIncidentDraft(completeDraft, fetcher)).resolves.toEqual({ incident: savedIncident });
     expect(fetcher).toHaveBeenCalledOnce();
     expect(fetcher.mock.calls[0][0]).toBe("/api/incidents");
-    expect(JSON.parse(fetcher.mock.calls[0][1]?.body as string)).toMatchObject({ ...completeDraft, source: "voice" });
+    expect(sentBody(fetcher)).toMatchObject({ ...completeDraft, source: "voice" });
   });
 
-  it("keeps unknown values unknown and blocks submission until the employee fills them in", async () => {
+  it("forwards the conversation transcript so it is stored with the incident", async () => {
+    const fetcher = created();
+    await submitVoiceIncidentDraft({ ...completeDraft, transcript: "Employee: My VPN keeps dropping." }, fetcher);
+    expect(sentBody(fetcher).transcript).toBe("Employee: My VPN keeps dropping.");
+  });
+
+  it("normalizes spoken category/urgency words and drops unknown keys instead of failing", async () => {
+    const fetcher = created();
+    await submitVoiceIncidentDraft({ ...completeDraft, category: "vpn", urgency: undefined, priority: "urgent", affectedUsers: "2", extraNotes: "x" }, fetcher);
+    const body = sentBody(fetcher);
+    expect(body).toMatchObject({ category: "NETWORK_CONNECTIVITY", urgency: "HIGH", affectedUsers: 2 });
+    expect(body).not.toHaveProperty("extraNotes");
+    expect(body).not.toHaveProperty("priority");
+  });
+
+  it("reports every missing required field without calling the API", async () => {
     const fetcher = vi.fn();
-    await expect(submitVoiceIncidentDraft({ ...completeDraft, affectedUsers: null }, fetcher))
-      .rejects.toBeInstanceOf(IncompleteVoiceDraftError);
+    const error = await submitVoiceIncidentDraft({ ...completeDraft, affectedUsers: null, businessImpact: "" }, fetcher).catch((cause) => cause);
+    expect(error).toBeInstanceOf(IncompleteVoiceDraftError);
+    expect(error.problem).toBe("missing");
+    expect(error.fields).toEqual(expect.arrayContaining(["affectedUsers", "businessImpact"]));
     expect(fetcher).not.toHaveBeenCalled();
   });
 
   it("rejects agent-supplied severity or status fields", async () => {
     const fetcher = vi.fn();
-    await expect(submitVoiceIncidentDraft({ ...completeDraft, severity: "CRITICAL" }, fetcher))
-      .rejects.toBeInstanceOf(IncompleteVoiceDraftError);
+    const error = await submitVoiceIncidentDraft({ ...completeDraft, severity: "CRITICAL" }, fetcher).catch((cause) => cause);
+    expect(error).toBeInstanceOf(IncompleteVoiceDraftError);
+    expect(error.problem).toBe("forbidden");
+    expect(error.fields).toEqual(["severity"]);
     expect(fetcher).not.toHaveBeenCalled();
   });
 });
